@@ -1,10 +1,6 @@
-import cv2
-import numpy as np
-from numpy import matlib as npm
-from collections import namedtuple
-import math
-import operator
-from functools import reduce
+
+from utils import *
+import argparse
 
 # super params
 theta_match = 0.9  # for dim=128 features
@@ -12,102 +8,28 @@ target_match = 0.95
 sigma_0 = 10
 motion_thresh = 2
 smoothing_alpha = 0.7
-object_thresh = 500
 
 
-def argmax2d(tensor):
-    Y, X = list(tensor.shape)
-    # flatten the Tensor along the height and width axes
-    flat_tensor = tensor.reshape(-1)
-    # argmax of the flat tensor
-    argmax = np.argmax(flat_tensor)
-
-    # convert the indices into 2d coordinates
-    argmax_y = argmax // X  # row
-    argmax_x = argmax % X  # col
-
-    return argmax_y, argmax_x
-
-
-def normalize(im):
-    im = im - np.min(im)
-    im = im / np.max(im)
-    return im
-
-
-def normalize_feat(feat):
-    norm = np.linalg.norm(feat)
-    feat = feat/(norm + 1e-4)
-    return feat
-
-
-def meshgrid2d(Y, X):
-    grid_y = np.linspace(0.0, Y - 1, Y)
-    grid_y = np.reshape(grid_y, [Y, 1])
-    grid_y = np.tile(grid_y, [1, X])
-
-    grid_x = np.linspace(0.0, X - 1, X)
-    grid_x = np.reshape(grid_x, [1, X])
-    grid_x = np.tile(grid_x, [Y, 1])
-
-    # outputs are Y x X
-    return grid_y, grid_x
-
-
-def to_polar(pt1, pt2):
-    # return r & phi between two points
-    arr = (pt2[0] - pt1[0], pt2[1] - pt1[1])
-    distance = np.sqrt(arr[0] ** 2 + arr[1] ** 2)
-    try:
-        angle = math.atan(arr[1] / arr[0])
-    except ZeroDivisionError:
-        angle = np.pi/2
-    return distance, angle
-
-
-def write_result(frame_lst, output_path, colored):
-
-    frame_shape = frame_lst[0].shape
-    video_size = (frame_shape[1], frame_shape[0])
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    video = cv2.VideoWriter(output_path, fourcc, 30, video_size, colored)
-
-    for frame in frame_lst:
-        video.write(frame)
-
-    video.release()
-
-
-def generate_heatmap(frame, gauss_map):
-    # generate vote space
-
-    max_y, max_x = argmax2d(gauss_map)
-
-    target_mask = np.zeros_like(frame)
-    target_mask[int(max_y), int(max_x)] = 255
-    target_mask = cv2.dilate(target_mask, None)
-
-    H, W, C = np.array(frame).shape
-    heatmap = (normalize(gauss_map) * 255).astype(np.uint8).reshape(H, W, 1)
-    heatmap = np.repeat(heatmap, 3, 2)
-
-    heat_vis = ((heatmap.astype(np.float32) + frame.astype(np.float32)) / 2.0).astype(np.uint8)
-
-    heat_vis[target_mask > 0] = 255
-
-    return heat_vis
+# init argparse
+parser = argparse.ArgumentParser()
+parser.add_argument('--video_path', type=str, help='The video need to be tracked',
+                    default="data/visuo_test.mp4")
+parser.add_argument('--object_location', type=tuple, help='object location in (x, y) form',
+                    default=(288, 208))
+parser.add_argument('--output_path', type=str, help='result video output path',
+                    default='test.mp4')
+args = parser.parse_args()
 
 
 # init detector & feature computer
-
 feature_params = dict(maxCorners=200, qualityLevel=0.01, minDistance=3.0,
                       blockSize=3, useHarrisDetector=True, k=0.04)  # param for corner detector
 ptrGFTT = cv2.GFTTDetector_create(**feature_params)
-
 sift = cv2.xfeatures2d.SIFT_create()
 
+
 # read first frame
-cap = cv2.VideoCapture("data/visuo_test.mp4")
+cap = cv2.VideoCapture(args.video_path)
 ret, first_frame = cap.read()
 prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
 
@@ -122,9 +44,11 @@ kp_mask = cv2.dilate(kp_mask, None)
 
 kp, des = sift.detectAndCompute(prev_gray, mask=kp_mask.astype(np.uint8))
 
+
 # init object to track using RGB frames
-obj_center = (288, 208)
+obj_center = args.object_location
 result_lst = []
+
 
 # init database
 db_size = len(kp)
@@ -143,6 +67,7 @@ all_pt = np.stack([np.array(pt) for pt in pt_db])  # (186, 2)
 dists = np.linalg.norm(all_pt - target, axis=1)
 target_ind = np.argmin(dists)
 target_pt = pt_db[target_ind]
+target_prev_pt = target_pt
 target_feat = des_db[target_ind]
 
 print("target_index", target_ind)
@@ -260,7 +185,7 @@ while cap.isOpened():
 
                 max_prob = np.max(prob)
 
-                if max_prob > 0.09:
+                if max_prob > 0.05:
                     # draw instruct line
                     gauss_map += prob.reshape(H, W)
 
@@ -277,4 +202,4 @@ while cap.isOpened():
         frame_heatmap = generate_heatmap(frame, gauss_map)  # frame is already plotted with lines
         result_lst.append(frame_heatmap)
 
-    write_result(result_lst, "test.mp4", True)  # wrong indent for test
+    write_result(result_lst, args.output_path, True)  # wrong indent for test
