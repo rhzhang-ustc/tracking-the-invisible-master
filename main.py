@@ -15,6 +15,26 @@ smoothing_alpha = 0.7
 object_thresh = 500
 
 
+def argmax2d(tensor):
+    Y, X = list(tensor.shape)
+    # flatten the Tensor along the height and width axes
+    flat_tensor = tensor.reshape(-1)
+    # argmax of the flat tensor
+    argmax = np.argmax(flat_tensor)
+
+    # convert the indices into 2d coordinates
+    argmax_y = argmax // X  # row
+    argmax_x = argmax % X  # col
+
+    return argmax_y, argmax_x
+
+
+def normalize(im):
+    im = im - np.min(im)
+    im = im / np.max(im)
+    return im
+
+
 def normalize_feat(feat):
     norm = np.linalg.norm(feat)
     feat = feat/(norm + 1e-4)
@@ -56,6 +76,26 @@ def write_result(frame_lst, output_path, colored):
         video.write(frame)
 
     video.release()
+
+
+def generate_heatmap(frame, gauss_map):
+    # generate vote space
+
+    max_y, max_x = argmax2d(gauss_map)
+
+    target_mask = np.zeros_like(frame)
+    target_mask[int(max_y), int(max_x)] = 255
+    target_mask = cv2.dilate(target_mask, None)
+
+    H, W, C = np.array(frame).shape
+    heatmap = (normalize(gauss_map) * 255).astype(np.uint8).reshape(H, W, 1)
+    heatmap = np.repeat(heatmap, 3, 2)
+
+    heat_vis = ((heatmap.astype(np.float32) + frame.astype(np.float32)) / 2.0).astype(np.uint8)
+
+    heat_vis[target_mask > 0] = 255
+
+    return heat_vis
 
 
 # init detector & feature computer
@@ -154,6 +194,7 @@ while cap.isOpened():
         print("model learning")
 
         motion = np.linalg.norm(np.array(target_prev_pt) - np.array(target_pt))
+
         if motion > motion_thresh:
             for i in range(kp_num):
 
@@ -195,7 +236,7 @@ while cap.isOpened():
     else:
         #  apply the model
         print("model applying")
-        gauss_map = np.zeros((H, W))   # (480, 640, 3)
+        gauss_map = np.zeros((H, W))   # (360, 640)
 
         for i in range(kp_num):
             origin_idx = idx_match[i]
@@ -213,7 +254,6 @@ while cap.isOpened():
                 diff = grid_xy.reshape(-1, 1, 2) - mu_vote.reshape(1, 1, 2)  # H*W x 1 x 2
                 diff_cov = np.matmul(diff, np.linalg.inv(cov).reshape(1, 2, 2))  # H*W x 1 x 2
                 data_term = np.matmul(diff_cov, diff.reshape(H * W, 2, 1))
-
                 data_term = data_term.reshape(-1)
 
                 prob = 1 / np.sqrt(2 * np.pi * np.sum(np.abs(cov))) * np.exp(-0.5 * data_term)
@@ -234,6 +274,7 @@ while cap.isOpened():
                     cv2.rectangle(frame, start_point, (start_point[0] + 3, start_point[1] + 3), (0, 0, 255))
                     cv2.rectangle(frame, end_point, (end_point[0] + 3, end_point[1] + 3), (255, 0, 0))
 
-        result_lst.append(frame)
+        frame_heatmap = generate_heatmap(frame, gauss_map)  # frame is already plotted with lines
+        result_lst.append(frame_heatmap)
 
-    write_result(result_lst, "test.mp4", True)  # indent not right
+    write_result(result_lst, "test.mp4", True)  # wrong indent for test
