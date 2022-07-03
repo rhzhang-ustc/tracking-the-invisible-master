@@ -7,9 +7,10 @@ import operator
 from functools import reduce
 
 # super params
-theta_match = 0.95  # for dim=128 features
+theta_match = 0.9  # for dim=128 features
+target_match = 0.95
 sigma_0 = 10
-theta_move = 0
+motion_thresh = 2
 smoothing_alpha = 0.7
 object_thresh = 500
 
@@ -20,35 +21,17 @@ def normalize_feat(feat):
     return feat
 
 
-def add_gaussion_map(img, pt, mean_r, mean_phi, var):
-    # the bottleneck!
+def meshgrid2d(Y, X):
+    grid_y = np.linspace(0.0, Y - 1, Y)
+    grid_y = np.reshape(grid_y, [Y, 1])
+    grid_y = np.tile(grid_y, [1, X])
 
-    h, w = img.shape
-    center_x = mean_r*math.cos(mean_phi)+pt[0]
-    center_y = mean_r*math.sin(mean_phi)+pt[1]
+    grid_x = np.linspace(0.0, X - 1, X)
+    grid_x = np.reshape(grid_x, [1, X])
+    grid_x = np.tile(grid_x, [Y, 1])
 
-    distance_map = np.array([[[i - center_x, j-center_y] for j in range(w)] for i in range(h)])  # (480, 640, 2)
-    distance_map = np.expand_dims(distance_map, axis=3)  # (480, 640, 2, 1)
-
-    var_inverse = np.linalg.inv(var)
-    det = np.linalg.det(var)
-
-    exponent = np.array([[np.dot(np.dot(distance_map[i, j].T, var_inverse), distance_map[i, j]) for j in range(w)]
-                         for i in range(h)])
-    exponent = np.squeeze(exponent)
-
-    img_addition = 1/np.sqrt(det) * np.exp(-0.5 * exponent)
-    img = img + img_addition
-
-    return np.max(img_addition)
-
-
-def object_compare(obj1, obj2):
-    #  return difference between two objects
-    hist1 = cv2.calcHist([obj1], [0], None, [256], [0, 256])
-    hist2 = cv2.calcHist([obj2], [0], None, [256], [0, 256])
-    differ = math.sqrt(reduce(operator.add, list(map(lambda a, b: (a-b)**2, hist1, hist2)))/len(hist1))
-    return differ
+    # outputs are Y x X
+    return grid_y, grid_x
 
 
 def to_polar(pt1, pt2):
@@ -60,10 +43,6 @@ def to_polar(pt1, pt2):
     except ZeroDivisionError:
         angle = np.pi/2
     return distance, angle
-
-
-def obj_move(bbox, bbox_init):
-    return np.sum(np.abs(bbox[i] - bbox_init[i]) for i in range(4)) > theta_move
 
 
 def write_result(frame_lst, output_path, colored):
@@ -88,34 +67,47 @@ ptrGFTT = cv2.GFTTDetector_create(**feature_params)
 sift = cv2.xfeatures2d.SIFT_create()
 
 # read first frame
-cap = cv2.VideoCapture("ethCup_input.WMV")
+cap = cv2.VideoCapture("data/visuo_test.mp4")
 ret, first_frame = cap.read()
 prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
+
+H, W, C = first_frame.shape
+
+grid_y, grid_x = meshgrid2d(H, W)
+grid_xy = np.stack([grid_x, grid_y], axis=2)  # H x W x 2
+
 
 dst = cv2.cornerHarris(prev_gray, 2, 3, 0.02)
 kp_mask = np.zeros_like(prev_gray)
 kp_mask[dst > 0.001 * dst.max()] = 1
 kp_mask = cv2.dilate(kp_mask, None)
 
-kp1, des1 = sift.detectAndCompute(prev_gray, mask=kp_mask.astype(np.uint8))
+kp, des = sift.detectAndCompute(prev_gray, mask=kp_mask.astype(np.uint8))
 
 # init object to track using RGB frames
-tracker = cv2.TrackerKCF_create()
-bbox = (150, 99, 78, 215)
-bbox_prev = bbox
-tracker.init(first_frame, bbox)
-bbox_prev_center = (189, 206)
-object_track = prev_gray[bbox[0]:bbox[0]+bbox[2], bbox[1]:bbox[1]+bbox[3]].copy()
+obj_center = (258, 225)
 result_lst = []
 
 # init database
-db_size = len(kp1)
+db_size = len(kp)
 
-des_db = [normalize_feat(des1[i]) for i in range(db_size)]
-r_db = [to_polar(kp1[i].pt, bbox_prev_center)[0] for i in range(db_size)]
+des_db = [normalize_feat(des[i]) for i in range(db_size)]
+r_db = [to_polar(kp[i].pt, obj_center)[0] for i in range(db_size)]
 cov_db = [sigma_0 * np.eye(2) for i in range(db_size)]
-phi_db = [to_polar(kp1[i].pt, bbox_prev_center)[1] for i in range(db_size)]
-pt_db = [kp1[i].pt for i in range(db_size)]
+phi_db = [to_polar(kp[i].pt, obj_center)[1] for i in range(db_size)]
+pt_db = [kp[i].pt for i in range(db_size)]
+
+
+# select the target
+target = np.array(obj_center).reshape(1, 2)  # [[189, 206]]
+all_xy = np.stack([np.array(pt) for pt in pt_db])  # (186, 2)
+
+dists = np.linalg.norm(all_xy-target, axis=1)
+target_ind = np.argmin(dists)
+target_pt = pt_db[target_ind]
+target_feat = des_db[target_ind]
+
+print("target_index", target_ind)
 
 
 # while run
@@ -134,9 +126,24 @@ while cap.isOpened():
 
     kp, des = sift.detectAndCompute(frame_gray, mask=kp_mask.astype(np.uint8))
 
-    des = np.array([normalize_feat(feat) for feat in des])
+    des = np.array([normalize_feat(feat) for feat in des])  # （175，128）
     kp_num = len(kp)  # m
 
+    # find target point first
+    corr_target = np.matmul(des, target_feat.T).reshape(-1, 1)  # (kp_num, 1)
+    max_corr = np.max(corr_target)
+
+    if max_corr > target_match:
+        # find the target
+        target_ind = np.argmax(corr_target)
+        target_prev_pt = target_pt  # for motion evaluation
+        target_pt = kp[target_ind].pt
+        target_feat = des[target_ind]
+
+    else:
+        target_ind = -1
+
+    # find each key point's match in database
     corr = np.matmul(des_db, des.T)  # (198, m) m is the size of kps in next frame
     corr_reduce = corr.max(axis=0)  # (m ,0)
 
@@ -144,23 +151,19 @@ while cap.isOpened():
     match_eval = corr_reduce > theta_match
     idx_match = [idx_match[i] if match_eval[i] else -1 for i in range(kp_num)]  # -1 no feature matched
 
-    success, bbox = tracker.update(frame)
-    object_detect = prev_gray[int(bbox[0]):int(bbox[0]+bbox[2]), int(bbox[1]):int(bbox[1]+bbox[3])].copy()
-
-    diff = object_compare(object_track, object_detect)
-
-    if diff < object_thresh:
+    if target_ind != -1:
         #  learn the model
         print("model learning")
-        bbox_center = (bbox[0] + bbox[2] // 2, bbox[1] + bbox[3] // 2)
 
-        if obj_move(bbox, bbox_prev):
+        motion = np.linalg.norm(np.array(target_prev_pt) - np.array(target_pt))
+
+        if motion > motion_thresh:
             for i in range(kp_num):
                 if idx_match[i] != -1:
 
                     origin_idx = idx_match[i]
                     pt = kp[i].pt
-                    distance, phi = to_polar(pt, bbox_center)
+                    distance, phi = to_polar(pt, target_pt)
 
                     r_db[origin_idx] = vote_r \
                         = smoothing_alpha * r_db[origin_idx] + (1-smoothing_alpha) * distance
@@ -168,7 +171,7 @@ while cap.isOpened():
                         = smoothing_alpha * phi_db[origin_idx] + (1-smoothing_alpha) * phi
 
                     x_estimate = np.array([pt[0] + vote_r * math.cos(vote_phi), pt[1] + vote_r * math.sin(vote_phi)])
-                    diff = np.expand_dims(x_estimate - np.array(bbox_center), axis=1)
+                    diff = np.expand_dims(x_estimate - np.array(target_pt), axis=1)
                     sigma = np.dot(diff, diff.T)
 
                     cov_db[origin_idx] = smoothing_alpha * cov_db[origin_idx] + (1-smoothing_alpha) * sigma
@@ -176,7 +179,7 @@ while cap.isOpened():
                 else:
 
                     pt = kp[i].pt
-                    distance, phi = to_polar(pt, bbox_center)
+                    distance, phi = to_polar(pt, target_pt)
 
                     des_db.append(des[i])
                     r_db.append(distance)
@@ -184,37 +187,52 @@ while cap.isOpened():
                     cov_db.append(sigma_0 * np.eye(2))
                     pt_db.append(pt)
 
-        bbox_prev = bbox
-        x, y, w, h = bbox
-        cv2.rectangle(frame, (int(x), int(y)), (int(x + w), int(y + h)), (255, 0, 0), 2)
+        x, y = target_pt
+        cv2.rectangle(frame, (int(x), int(y)), (int(x + 10), int(y + 10)), (0, 255, 255), 2)
         result_lst.append(frame)
 
     else:
         #  apply the model
         print("model applying")
-        h, w, c = frame.shape
-        gauss_map = np.zeros((h, w))   # (480, 640, 3)
+        gauss_map = np.zeros((H, W))   # (480, 640, 3)
 
         for i in range(kp_num):
             origin_idx = idx_match[i]
             if origin_idx != -1:
                 # use matched feature to estimate objects
 
+                pt = kp[i].pt
                 distance = r_db[origin_idx]
                 phi = phi_db[origin_idx]
                 cov = cov_db[origin_idx]
 
-                max_prob = add_gaussion_map(gauss_map, kp[i].pt, distance, phi, cov)
+                mu_vote = np.array([pt[0] + distance * np.cos(phi),
+                                    pt[1] + distance * np.sin(phi)])
 
-                center_x = int(distance * math.cos(phi) + kp[i].pt[0])
-                center_y = int(distance * math.sin(phi) + kp[i].pt[1])
+                diff = grid_xy.reshape(-1, 1, 2) - mu_vote.reshape(1, 1, 2)  # H*W x 1 x 2
+                diff_cov = np.matmul(diff, np.linalg.inv(cov).reshape(1, 2, 2))  # H*W x 1 x 2
+                data_term = np.matmul(diff_cov, diff.reshape(H * W, 2, 1))
 
-                start_point = (int(kp[i].pt[0]), int(kp[i].pt[1]))
-                end_point = (center_x, center_y)
+                data_term = data_term.reshape(-1)
 
-                cv2.line(frame, start_point, end_point, (0, 0, 255))
-                cv2.rectangle(frame, start_point, (start_point[0] + 3, start_point[1] + 3), (0, 0, 255))
-                cv2.rectangle(frame, end_point, (end_point[0] + 3, end_point[1] + 3), (255, 0, 0))
+                prob = 1 / np.sqrt(2 * np.pi * np.sum(np.abs(cov))) * np.exp(-0.5 * data_term)
+
+                max_prob = np.max(prob)
+                # print(max_prob)
+
+                if max_prob > 0.2:
+                    # draw instruct line
+                    gauss_map += prob.reshape(H, W)
+
+                    center_x = int(distance * math.cos(phi) + kp[i].pt[0])
+                    center_y = int(distance * math.sin(phi) + kp[i].pt[1])
+
+                    start_point = (int(kp[i].pt[0]), int(kp[i].pt[1]))
+                    end_point = (center_x, center_y)
+
+                    cv2.line(frame, start_point, end_point, (0, 0, 255))
+                    cv2.rectangle(frame, start_point, (start_point[0] + 3, start_point[1] + 3), (0, 0, 255))
+                    cv2.rectangle(frame, end_point, (end_point[0] + 3, end_point[1] + 3), (255, 0, 0))
 
         maximum = np.unravel_index(np.argmax(gauss_map), gauss_map.shape)
         cv2.rectangle(frame, maximum, (maximum[0] + 3, maximum[1] + 3), (0, 255, 0), 2)
