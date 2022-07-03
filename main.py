@@ -72,10 +72,8 @@ ret, first_frame = cap.read()
 prev_gray = cv2.cvtColor(first_frame, cv2.COLOR_BGR2GRAY)
 
 H, W, C = first_frame.shape
-
 grid_y, grid_x = meshgrid2d(H, W)
 grid_xy = np.stack([grid_x, grid_y], axis=2)  # H x W x 2
-
 
 dst = cv2.cornerHarris(prev_gray, 2, 3, 0.02)
 kp_mask = np.zeros_like(prev_gray)
@@ -85,7 +83,7 @@ kp_mask = cv2.dilate(kp_mask, None)
 kp, des = sift.detectAndCompute(prev_gray, mask=kp_mask.astype(np.uint8))
 
 # init object to track using RGB frames
-obj_center = (258, 225)
+obj_center = (288, 208)
 result_lst = []
 
 # init database
@@ -100,9 +98,9 @@ pt_db = [kp[i].pt for i in range(db_size)]
 
 # select the target
 target = np.array(obj_center).reshape(1, 2)  # [[189, 206]]
-all_xy = np.stack([np.array(pt) for pt in pt_db])  # (186, 2)
+all_pt = np.stack([np.array(pt) for pt in pt_db])  # (186, 2)
 
-dists = np.linalg.norm(all_xy-target, axis=1)
+dists = np.linalg.norm(all_pt - target, axis=1)
 target_ind = np.argmin(dists)
 target_pt = pt_db[target_ind]
 target_feat = des_db[target_ind]
@@ -156,13 +154,15 @@ while cap.isOpened():
         print("model learning")
 
         motion = np.linalg.norm(np.array(target_prev_pt) - np.array(target_pt))
-
         if motion > motion_thresh:
             for i in range(kp_num):
-                if idx_match[i] != -1:
 
+                if idx_match[i] != -1:
                     origin_idx = idx_match[i]
                     pt = kp[i].pt
+
+                    motion_kp = np.linalg.norm(np.array(pt_db[origin_idx]) - np.array(pt))
+
                     distance, phi = to_polar(pt, target_pt)
 
                     r_db[origin_idx] = vote_r \
@@ -175,6 +175,7 @@ while cap.isOpened():
                     sigma = np.dot(diff, diff.T)
 
                     cov_db[origin_idx] = smoothing_alpha * cov_db[origin_idx] + (1-smoothing_alpha) * sigma
+                    pt_db[origin_idx] = pt
 
                 else:
 
@@ -188,7 +189,7 @@ while cap.isOpened():
                     pt_db.append(pt)
 
         x, y = target_pt
-        cv2.rectangle(frame, (int(x), int(y)), (int(x + 10), int(y + 10)), (0, 255, 255), 2)
+        cv2.rectangle(frame, (int(x-5), int(y-5)), (int(x+5), int(y+5)), (0, 255, 255), 2)
         result_lst.append(frame)
 
     else:
@@ -218,9 +219,8 @@ while cap.isOpened():
                 prob = 1 / np.sqrt(2 * np.pi * np.sum(np.abs(cov))) * np.exp(-0.5 * data_term)
 
                 max_prob = np.max(prob)
-                # print(max_prob)
 
-                if max_prob > 0.2:
+                if max_prob > 0.09:
                     # draw instruct line
                     gauss_map += prob.reshape(H, W)
 
@@ -234,8 +234,6 @@ while cap.isOpened():
                     cv2.rectangle(frame, start_point, (start_point[0] + 3, start_point[1] + 3), (0, 0, 255))
                     cv2.rectangle(frame, end_point, (end_point[0] + 3, end_point[1] + 3), (255, 0, 0))
 
-        maximum = np.unravel_index(np.argmax(gauss_map), gauss_map.shape)
-        cv2.rectangle(frame, maximum, (maximum[0] + 3, maximum[1] + 3), (0, 255, 0), 2)
         result_lst.append(frame)
 
     write_result(result_lst, "test.mp4", True)  # indent not right
