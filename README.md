@@ -11,7 +11,7 @@ Python 3.6
 
 ## Usage
 
-For simplicity, just run `python main.py` to generate the demo video (test.mp4)
+For simplicity, just run `python main.py` to generate the demo video (test.mp4). The default setting is to track claw of the robot. 
 
 If you want to try some other videos:
 
